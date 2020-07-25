@@ -45,3 +45,5 @@ const gfaJson =
 
 window.parse_line = gfa.parse_line;
 window.gfaJson = gfaJson;
+
+window.getLilJson = gfa.get_lil_json;

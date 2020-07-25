@@ -11,6 +11,5 @@ module.exports = {
   plugins: [
     new CopyWebpackPlugin(['index.html']),
     new CopyWebpackPlugin(["lil.gfa"]),
-    new CopyWebpackPlugin(["lil.json"]),
   ],
 };

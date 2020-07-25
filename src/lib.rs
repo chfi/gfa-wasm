@@ -1,23 +1,31 @@
 mod utils;
 
+use js_sys::{Array, JsString};
 use serde::{Deserialize, Serialize};
+use wasm_bindgen::{prelude::*, JsCast};
+use wasm_bindgen_futures::JsFuture;
+use web_sys::{Request, RequestInit, RequestMode, Response};
 
-use wasm_bindgen::prelude::*;
-
-use bstr::{BStr, BString};
+use bstr::BString;
 
 use gfa::{
-    gfa::{Line, Link, Orientation, Path, Segment, GFA},
-    optfields::OptFields,
+    gfa::{Line, Orientation},
     parser::GFAParser,
 };
 
-use lazy_static::lazy_static;
+macro_rules! log {
+    ( $( $t:tt )*) => {
+        web_sys::console::log_1(&format!( $( $t )* ).into());
+    }
+}
 
-// pub struct
+// When the `wee_alloc` feature is enabled, use `wee_alloc` as the global
+// allocator.
+#[cfg(feature = "wee_alloc")]
+#[global_allocator]
+static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 
 #[derive(Debug, Serialize, Deserialize)]
-#[wasm_bindgen]
 pub struct JSegment {
     pub name: String,
     pub sequence: String,
@@ -37,6 +45,13 @@ pub struct JPath {
     pub path_name: String,
     pub segment_names: Vec<(String, bool)>,
     pub overlaps: Vec<String>,
+}
+
+#[derive(Default, Debug, Serialize, Deserialize)]
+pub struct JGFA {
+    pub segments: Vec<JSegment>,
+    pub links: Vec<JLink>,
+    pub paths: Vec<JPath>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -97,25 +112,59 @@ fn line_to_jline(line: Line<BString, ()>) -> Option<JLine> {
     }
 }
 
-// When the `wee_alloc` feature is enabled, use `wee_alloc` as the global
-// allocator.
-#[cfg(feature = "wee_alloc")]
-#[global_allocator]
-static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
-
 #[wasm_bindgen]
-extern "C" {
-    fn alert(s: &str);
+pub async fn get_lil_json() -> Result<JsValue, JsValue> {
+    let mut opts = RequestInit::new();
+    opts.method("GET");
+    // opts.mode(RequestMode::Cors);
+    opts.mode(RequestMode::SameOrigin);
+
+    let url = "./lil.gfa";
+
+    let request = Request::new_with_str_and_init(&url, &opts)?;
+
+    let window = web_sys::window().unwrap();
+
+    let resp_value = JsFuture::from(window.fetch_with_request(&request)).await?;
+
+    assert!(resp_value.is_instance_of::<Response>());
+    let resp: Response = resp_value.dyn_into().unwrap();
+
+    let text: JsValue = JsFuture::from(resp.text()?).await?;
+
+    let string: JsString = text.dyn_into().unwrap();
+
+    let jgfa = parse_gfa(string);
+
+    Ok(JsValue::from_serde(&jgfa).unwrap())
 }
 
-#[wasm_bindgen]
-pub fn greet() {
-    alert("Hello, wasm-gfa!");
+fn parse_gfa(s: JsString) -> JGFA {
+    let mut jgfa: JGFA = Default::default();
+    s.split("\n")
+        .iter()
+        .filter_map(|l| {
+            let line = l.as_string()?;
+            let bs = line.as_bytes();
+            let parsed = parse_line_util(bs)?;
+            line_to_jline(parsed)
+        })
+        .for_each(|jl| match jl {
+            JLine::Segment(js) => jgfa.segments.push(js),
+            JLine::Link(js) => jgfa.links.push(js),
+            JLine::Path(js) => jgfa.paths.push(js),
+        });
+
+    jgfa
 }
+
+// #[wasm_bindgen]
+// extern "C" {
+//     fn alert(s: &str);
+// }
 
 fn parse_line_util(bs: &[u8]) -> Option<Line<BString, ()>> {
     let parser: GFAParser<()> = GFAParser::new();
-
     parser.parse_line(bs)
 }
 
