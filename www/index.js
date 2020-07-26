@@ -1,49 +1,88 @@
 import * as gfa from "wasm-gfa";
 import { memory } from "wasm-gfa/wasm_gfa_bg";
 
-const gfaJson =
-["H	VN:Z:1.0",
-"S	1	CAAATAAG",
-"S	2	A",
-"S	3	G",
-"S	4	T",
-"S	5	C",
-"S	6	TTG",
-"S	7	A",
-"S	8	G",
-"S	9	AAATTTTCTGGAGTTCTAT",
-"S	10	A",
-"S	11	T",
-"S	12	ATAT",
-"S	13	A",
-"S	14	T",
-"S	15	CCAACTCTCTG",
-"P	x	1+,3+,5+,6+,8+,9+,11+,12+,14+,15+	8M,1M,1M,3M,1M,19M,1M,4M,1M,11M",
-"P	y	1+,2+,4+,6+,7+,9+,11+,12+,14+,15+	8M,1M,1M,3M,1M,19M,1M,4M,1M,11M",
-"P	z	1+,3+,5+,6+,7+,9+,10+,12+,13+,15+	8M,1M,1M,3M,1M,19M,1M,4M,1M,11M",
-"L	1	+	2	+	0M",
-"L	1	+	3	+	0M",
-"L	2	+	4	+	0M",
-"L	2	+	5	+	0M",
-"L	3	+	4	+	0M",
-"L	3	+	5	+	0M",
-"L	4	+	6	+	0M",
-"L	5	+	6	+	0M",
-"L	6	+	7	+	0M",
-"L	6	+	8	+	0M",
-"L	7	+	9	+	0M",
-"L	8	+	9	+	0M",
-"L	9	+	10	+	0M",
-"L	9	+	11	+	0M",
-"L	10	+	12	+	0M",
-"L	11	+	12	+	0M",
-"L	12	+	13	+	0M",
-"L	12	+	14	+	0M",
-"L	13	+	15	+	0M",
- "L	14	+	15	+	0M"];
+const ptrBytes = ({start, len}) => {
+  let bytes = new Uint8Array(memory.buffer, start, len);
+  return bytes;
+};
+
+const ptrString = ({start, len}) => {
+  let bytes = new Uint8Array(memory.buffer, start, len);
+  let string = new TextDecoder('utf8').decode(bytes);
+  return string;
+}
 
 
-window.parse_line = gfa.parse_line;
-window.gfaJson = gfaJson;
+const get_segment = (graph, ix) => {
+  let nPtr = graph.get_segment_name(ix);
+  let sPtr = graph.get_segment_seq(ix);
+  let name = ptrString(nPtr);
+  let seq = ptrString(sPtr);
+  return { name, seq };
+}
 
-window.getLilJson = gfa.get_lil_json;
+const unpack_string_ptr = (ptr) => {
+  let string_arr = new Uint32Array(memory.buffer, ptr, 3);
+  return { start: string_arr[0],
+           len: string_arr[1],
+           cap: string_arr[2] }
+};
+
+const unpack_segments = (ptr, len) => {
+  let result = [];
+  for (let i = 0; i < len; i++) {
+    let name_ptr = ptr + i * 24;
+    let seq_ptr = ptr + 12 + i * 24;
+
+    let name_str = unpack_string_ptr(name_ptr);
+    let seq_str = unpack_string_ptr(seq_ptr);
+
+    let name = ptrString(name_str);
+    let seq = ptrString(seq_str);
+
+    result.push({name, seq});
+  }
+
+  return result;
+}
+
+const seg_from_memory = (ptr) => {
+  let name_ptr = ptr;
+  let seq_ptr = ptr + 12; // Rust string size in wasm
+
+};
+
+window.ptrBytes = ptrBytes;
+window.ptrString = ptrString;
+
+
+const main = (graph) => {
+  window.graph = graph;
+
+  window.getSegment = (ix) => {
+    return get_segment(graph, ix);
+  };
+
+  console.log("segments start at " + graph.segments());
+  console.log("jsegment size: " + gfa.seg_size());
+  console.log("string size: " + gfa.string_size());
+
+
+  let segments_name_ptr = graph.segments();
+  let segments_seq_ptr = segments_name_ptr + gfa.string_size();
+
+  let seq_string = unpack_string_ptr(segments_seq_ptr);
+
+  console.log("Seq parts: ");
+  console.log(seq_string.ptr + " - " + seq_string.len);
+
+  let { name, seq } = get_segment(graph, 0);
+  console.log("  " + name + " - " + seq);
+
+  let segments = unpack_segments(graph.segments(), 5);
+  console.log(segments);
+  window.segments = segments;
+
+};
+
+gfa.fetch_wgfa("./lil.gfa").then(g => main(g));

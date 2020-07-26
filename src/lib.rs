@@ -25,13 +25,13 @@ macro_rules! log {
 #[global_allocator]
 static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JSegment {
     pub name: String,
     pub sequence: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JLink {
     pub from_segment: String,
     pub from_orient: bool,
@@ -40,18 +40,120 @@ pub struct JLink {
     pub overlap: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JPath {
     pub path_name: String,
     pub segment_names: Vec<(String, bool)>,
     pub overlaps: Vec<String>,
 }
 
-#[derive(Default, Debug, Serialize, Deserialize)]
+#[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JGFA {
     pub segments: Vec<JSegment>,
     pub links: Vec<JLink>,
     pub paths: Vec<JPath>,
+}
+
+#[wasm_bindgen]
+#[derive(Default, Clone, Debug, PartialEq, Eq)]
+pub struct WGFA {
+    segments: Vec<JSegment>,
+    links: Vec<JLink>,
+    paths: Vec<JPath>,
+}
+
+impl WGFA {
+    fn parse_gfa(gfa_string: JsString) -> WGFA {
+        let mut wgfa: WGFA = Default::default();
+
+        gfa_string
+            .split("\n")
+            .iter()
+            .filter_map(|l| {
+                let line = l.as_string()?;
+                let bs = line.as_bytes();
+                let parsed = parse_line_util(bs)?;
+                line_to_jline(parsed)
+            })
+            .for_each(|jl| match jl {
+                JLine::Segment(js) => wgfa.segments.push(js),
+                JLine::Link(js) => wgfa.links.push(js),
+                JLine::Path(js) => wgfa.paths.push(js),
+            });
+
+        wgfa
+    }
+}
+
+#[wasm_bindgen]
+pub struct StrPtr {
+    pub start: *const u8,
+    pub len: usize,
+}
+
+impl StrPtr {
+    pub fn new(s: &str) -> StrPtr {
+        let start = s.as_ptr();
+        let len = s.len();
+        StrPtr { start, len }
+    }
+}
+
+#[wasm_bindgen]
+impl WGFA {
+    pub fn segments(&self) -> *const JSegment {
+        self.segments.as_slice().as_ptr()
+    }
+
+    // pub fn get_segment(&self, ix: usize) -> bool {
+    //     let r = &self.segments[ix];
+    //     r.as_ptr()
+    // }
+
+    pub fn get_segment_name(&self, ix: usize) -> StrPtr {
+        StrPtr::new(&self.segments[ix].name)
+    }
+
+    pub fn get_segment_seq(&self, ix: usize) -> StrPtr {
+        StrPtr::new(&self.segments[ix].sequence)
+    }
+}
+
+#[wasm_bindgen]
+pub fn seg_size() -> usize {
+    std::mem::size_of::<JSegment>()
+}
+
+#[wasm_bindgen]
+pub fn string_size() -> usize {
+    std::mem::size_of::<String>()
+}
+
+#[wasm_bindgen]
+pub async fn fetch_wgfa(url: JsString) -> Result<WGFA, JsValue> {
+    let url: String = url.as_string().ok_or("Error parsing url")?;
+
+    let mut opts = RequestInit::new();
+    opts.method("GET");
+    // opts.mode(RequestMode::Cors);
+    opts.mode(RequestMode::SameOrigin);
+
+    let request = Request::new_with_str_and_init(&url, &opts)?;
+
+    let window = web_sys::window().unwrap();
+
+    let resp_value = JsFuture::from(window.fetch_with_request(&request)).await?;
+
+    assert!(resp_value.is_instance_of::<Response>());
+    let resp: Response = resp_value.dyn_into().unwrap();
+
+    let text: JsValue = JsFuture::from(resp.text()?).await?;
+
+    let string: JsString = text.dyn_into().unwrap();
+
+    let wgfa = WGFA::parse_gfa(string);
+
+    Ok(wgfa)
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -71,23 +173,19 @@ fn orient_bool(o: Orientation) -> bool {
 fn line_to_jline(line: Line<BString, ()>) -> Option<JLine> {
     match line {
         Line::Segment(seg) => {
-            let name = seg.name.to_string();
-            let sequence = seg.sequence.to_string();
-            let jseg = JSegment { name, sequence };
+            let jseg = JSegment {
+                name: seg.name.to_string(),
+                sequence: seg.sequence.to_string(),
+            };
             Some(JLine::Segment(jseg))
         }
         Line::Link(link) => {
-            let from_segment = link.from_segment.to_string();
-            let from_orient = orient_bool(link.from_orient);
-            let to_segment = link.to_segment.to_string();
-            let to_orient = orient_bool(link.to_orient);
-            let overlap = link.overlap.to_string();
             let jlink = JLink {
-                from_segment,
-                from_orient,
-                to_segment,
-                to_orient,
-                overlap,
+                from_segment: link.from_segment.to_string(),
+                from_orient: orient_bool(link.from_orient),
+                to_segment: link.to_segment.to_string(),
+                to_orient: orient_bool(link.to_orient),
+                overlap: link.overlap.to_string(),
             };
 
             Some(JLine::Link(jlink))
@@ -113,13 +211,13 @@ fn line_to_jline(line: Line<BString, ()>) -> Option<JLine> {
 }
 
 #[wasm_bindgen]
-pub async fn get_lil_json() -> Result<JsValue, JsValue> {
+pub async fn fetch_gfa(url: JsString) -> Result<JsValue, JsValue> {
+    let url: String = url.as_string().ok_or("Error parsing url")?;
+
     let mut opts = RequestInit::new();
     opts.method("GET");
     // opts.mode(RequestMode::Cors);
     opts.mode(RequestMode::SameOrigin);
-
-    let url = "./lil.gfa";
 
     let request = Request::new_with_str_and_init(&url, &opts)?;
 
