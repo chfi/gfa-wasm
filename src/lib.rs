@@ -6,10 +6,14 @@ use wasm_bindgen::{prelude::*, JsCast};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{Request, RequestInit, RequestMode, Response};
 
+use std::sync::{Arc, Mutex};
+
+use lazy_static::lazy_static;
+
 use bstr::BString;
 
 use gfa::{
-    gfa::{Line, Orientation},
+    gfa::{Line, Orientation, GFA},
     parser::GFAParser,
 };
 
@@ -19,11 +23,136 @@ macro_rules! log {
     }
 }
 
+#[wasm_bindgen(module = "/util.js")]
+extern "C" {
+    fn immutable_closure(f: &dyn Fn(u32) -> String);
+}
+
+#[wasm_bindgen]
+pub fn some_fun() {
+    immutable_closure(&|x| format!("{}", x * 3));
+}
+
 // When the `wee_alloc` feature is enabled, use `wee_alloc` as the global
 // allocator.
 #[cfg(feature = "wee_alloc")]
 #[global_allocator]
 static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
+
+type Segment = gfa::gfa::Segment<BString, ()>;
+type Link = gfa::gfa::Link<BString, ()>;
+type Path = gfa::gfa::Path<()>;
+
+#[wasm_bindgen]
+pub struct WrappedGFA {
+    graph: GFA<BString, ()>,
+}
+
+impl WrappedGFA {
+    fn parse(gfa_string: JsString) -> WrappedGFA {
+        let parser: GFAParser<()> = GFAParser::new();
+        let gfa_string: String = gfa_string.as_string().unwrap();
+        let lines = gfa_string.lines().map(|l| l.as_bytes());
+        let graph = parser.parse_all(lines);
+        WrappedGFA { graph }
+    }
+}
+
+#[wasm_bindgen]
+pub struct JSlice {
+    pub start: usize,
+    pub len: usize,
+    pub stride: usize,
+}
+
+impl JSlice {
+    pub fn new(start: usize, len: usize, stride: usize) -> Self {
+        JSlice { start, len, stride }
+    }
+
+    pub fn from_slice<T>(slice: &[T]) -> Self {
+        let start = slice.as_ptr() as usize;
+        let len = slice.len();
+        let stride = std::mem::size_of::<T>();
+
+        JSlice { start, len, stride }
+    }
+}
+
+#[wasm_bindgen]
+impl WrappedGFA {
+    pub fn new_gfa() -> WrappedGFA {
+        WrappedGFA {
+            graph: Default::default(),
+        }
+    }
+
+    pub fn each_segment(&self, f: &js_sys::Function) {
+        let this = JsValue::null();
+        for x in &self.graph.segments {
+            let name = std::str::from_utf8(&x.name).unwrap();
+            let name = JsValue::from(name);
+            let seq = std::str::from_utf8(&x.sequence).unwrap();
+            let seq = JsValue::from(seq);
+            let _ = f.call2(&this, &name, &seq);
+        }
+    }
+
+    pub fn paths(&self) -> JSlice {
+        JSlice::from_slice(self.graph.paths.as_slice())
+    }
+
+    pub fn segments(&self) -> JSlice {
+        JSlice::from_slice(self.graph.segments.as_slice())
+    }
+
+    pub fn links(&self) -> JSlice {
+        JSlice::from_slice(self.graph.links.as_slice())
+    }
+
+    pub fn get_path(&self, i: usize) -> *const Path {
+        &self.graph.paths[i]
+    }
+
+    pub fn path_count(&self) -> usize {
+        self.graph.paths.len()
+    }
+
+    pub fn get_segment(&self, i: usize) -> *const Segment {
+        &self.graph.segments[i]
+    }
+
+    pub fn segment_count(&self) -> usize {
+        self.graph.segments.len()
+    }
+}
+
+#[wasm_bindgen]
+pub async fn fetch_gfa(url: JsString) -> Result<WrappedGFA, JsValue> {
+    let url: String = url.as_string().ok_or("Error parsing url")?;
+
+    let mut opts = RequestInit::new();
+    opts.method("GET");
+    opts.mode(RequestMode::SameOrigin);
+
+    let request = Request::new_with_str_and_init(&url, &opts)?;
+
+    let window = web_sys::window().unwrap();
+    let resp_value = JsFuture::from(window.fetch_with_request(&request)).await?;
+
+    assert!(resp_value.is_instance_of::<Response>());
+    let resp: Response = resp_value.dyn_into().unwrap();
+
+    let text: JsValue = JsFuture::from(resp.text()?).await?;
+
+    let wrapped_gfa = WrappedGFA::parse(text.dyn_into().unwrap());
+
+    Ok(wrapped_gfa)
+}
+
+/////////////////
+///////////////// JSON-serializable GFA types
+/////////////////
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JSegment {
@@ -47,11 +176,22 @@ pub struct JPath {
     pub overlaps: Vec<String>,
 }
 
-#[derive(Clone, Default, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct JGFA {
-    pub segments: Vec<JSegment>,
-    pub links: Vec<JLink>,
-    pub paths: Vec<JPath>,
+// #[wasm_bindgen]
+// extern "C" {
+//     fn alert(s: &str);
+// }
+
+fn parse_line_util(bs: &[u8]) -> Option<Line<BString, ()>> {
+    let parser: GFAParser<()> = GFAParser::new();
+    parser.parse_line(bs)
+}
+
+#[wasm_bindgen]
+pub fn parse_line(s: &str) -> JsValue {
+    let bs = s.as_bytes();
+    let line = parse_line_util(bs);
+    let jline = line.and_then(line_to_jline);
+    JsValue::from_serde(&jline).unwrap()
 }
 
 #[wasm_bindgen]
@@ -208,68 +348,4 @@ fn line_to_jline(line: Line<BString, ()>) -> Option<JLine> {
         }
         _ => None,
     }
-}
-
-#[wasm_bindgen]
-pub async fn fetch_gfa(url: JsString) -> Result<JsValue, JsValue> {
-    let url: String = url.as_string().ok_or("Error parsing url")?;
-
-    let mut opts = RequestInit::new();
-    opts.method("GET");
-    // opts.mode(RequestMode::Cors);
-    opts.mode(RequestMode::SameOrigin);
-
-    let request = Request::new_with_str_and_init(&url, &opts)?;
-
-    let window = web_sys::window().unwrap();
-
-    let resp_value = JsFuture::from(window.fetch_with_request(&request)).await?;
-
-    assert!(resp_value.is_instance_of::<Response>());
-    let resp: Response = resp_value.dyn_into().unwrap();
-
-    let text: JsValue = JsFuture::from(resp.text()?).await?;
-
-    let string: JsString = text.dyn_into().unwrap();
-
-    let jgfa = parse_gfa(string);
-
-    Ok(JsValue::from_serde(&jgfa).unwrap())
-}
-
-fn parse_gfa(s: JsString) -> JGFA {
-    let mut jgfa: JGFA = Default::default();
-    s.split("\n")
-        .iter()
-        .filter_map(|l| {
-            let line = l.as_string()?;
-            let bs = line.as_bytes();
-            let parsed = parse_line_util(bs)?;
-            line_to_jline(parsed)
-        })
-        .for_each(|jl| match jl {
-            JLine::Segment(js) => jgfa.segments.push(js),
-            JLine::Link(js) => jgfa.links.push(js),
-            JLine::Path(js) => jgfa.paths.push(js),
-        });
-
-    jgfa
-}
-
-// #[wasm_bindgen]
-// extern "C" {
-//     fn alert(s: &str);
-// }
-
-fn parse_line_util(bs: &[u8]) -> Option<Line<BString, ()>> {
-    let parser: GFAParser<()> = GFAParser::new();
-    parser.parse_line(bs)
-}
-
-#[wasm_bindgen]
-pub fn parse_line(s: &str) -> JsValue {
-    let bs = s.as_bytes();
-    let line = parse_line_util(bs);
-    let jline = line.and_then(line_to_jline);
-    JsValue::from_serde(&jline).unwrap()
 }
